@@ -99,6 +99,10 @@ Estimates are close to actual. On-chain charges appear to round up to $0.01 mini
 | Checkout | Per transaction | Transaction amount | USDC wallet |
 | **Build (PaaS)** | **Per service** | **$0.25/month** | **Separate Build credits** |
 | **Build Addons** | **Postgres/Redis** | **$0.25/month each** | **Separate Build credits** |
+| Laso Auth | Session token | $0.001 | USDC wallet (❌ broken in beta) |
+| Laso Prepaid Card | Order card | $5–$1000 | USDC wallet (untestable) |
+| Laso Send Payment | Venmo/PayPal | $5–$1000 | USDC wallet (untestable) |
+| Laso Free endpoints | Balance, merchants, card data | Free | Requires Laso id_token |
 
 **Verdict: CONFIRMED** — Cost-per-call is discoverable and roughly accurate. Token-based providers (OpenAI, Anthropic, Gemini) show a range instead of a fixed price, which makes sense since cost depends on usage.
 
