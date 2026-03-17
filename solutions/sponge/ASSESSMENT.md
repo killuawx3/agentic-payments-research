@@ -189,7 +189,7 @@ If you're building an agent that needs to trade, bridge, and operate across chai
 | Bridges | 🟡 Infrastructure connected, needs real amounts |
 | Amazon shopping | 🔴 Not available (404) |
 | Planning API | 🔴 Not available (404) |
-| Prepaid cards | ⚪ Not tested |
+| Prepaid cards (Laso) | 🟢 Works — full pipeline tested ($5 card ordered) |
 
 ---
 
