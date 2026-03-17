@@ -84,16 +84,21 @@ You can fetch estimated costs per endpoint via `GET /api/wrapped/md?provider=<sl
 
 Estimates are close to actual. On-chain charges appear to round up to $0.01 minimum.
 
-**Sample pricing across other providers (from discovery endpoints):**
+**Sample pricing across providers (from discovery endpoints + testing):**
 
-| Provider | Endpoint | Est. Cost |
-|----------|----------|-----------|
-| OpenAI | Chat | ~$0.001–$0.20 (model-dependent) |
-| Anthropic | Messages | ~$0.001–$0.20 (model-dependent) |
-| Firecrawl | Scrape | $0.003+ |
-| Resend | Send Email | $0.004 |
-| X (Twitter) | All endpoints | $0.016 flat |
-| Abstract (email, IP, etc.) | All endpoints | $0.006 |
+| Provider / Feature | Endpoint | Est. Cost | Billing Source |
+|-------------------|----------|-----------|----------------|
+| Exa | Search | $0.010 | USDC wallet |
+| Exa | Contents | $0.004/page | USDC wallet |
+| OpenAI | Chat | ~$0.001–$0.20 (model-dependent) | USDC wallet |
+| Anthropic | Messages | ~$0.001–$0.20 (model-dependent) | USDC wallet |
+| Firecrawl | Scrape | $0.003+ | USDC wallet |
+| Resend | Send Email | $0.004 | USDC wallet |
+| X (Twitter) | All endpoints | $0.016 flat | USDC wallet |
+| Abstract (email, IP, etc.) | All endpoints | $0.006 | USDC wallet |
+| Checkout | Per transaction | Transaction amount | USDC wallet |
+| **Build (PaaS)** | **Per service** | **$0.25/month** | **Separate Build credits** |
+| **Build Addons** | **Postgres/Redis** | **$0.25/month each** | **Separate Build credits** |
 
 **Verdict: CONFIRMED** — Cost-per-call is discoverable and roughly accurate. Token-based providers (OpenAI, Anthropic, Gemini) show a range instead of a fixed price, which makes sense since cost depends on usage.
 
