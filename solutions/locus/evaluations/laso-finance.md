@@ -140,12 +140,26 @@ The x402 endpoints listing for laso-auth states `_No parameters required._` and 
 
 ---
 
+## Re-Test (Same Session, After Sponge Comparison)
+
+We re-tested Locus's Laso auth after successfully completing the full card pipeline through Sponge (same Laso Finance backend). Tried multiple approaches:
+
+- `POST /x402/laso-auth` with `{}` → **400** (validation error)
+- `POST /x402/laso-auth` with body → **500** (`Cannot read properties of undefined (reading 'name')`)
+- `POST /x402/call` with `laso.finance/auth` URL → **500** (same null reference)
+- Various header/method combinations → all 500
+
+**Conclusion:** The bug is definitively in Locus's x402 proxy code, NOT in Laso Finance. Sponge's x402 proxy hits the same `laso.finance/auth` endpoint and gets a successful response with tokens. Locus's handler crashes before even reaching Laso.
+
+---
+
 ## Cost of This Evaluation
 
 | Item | Cost |
 |------|------|
 | Auth attempts (all failed) | $0.00 |
 | Free endpoint attempts (all 401) | $0.00 |
+| Re-test attempts (all failed) | $0.00 |
 | **Total** | **$0.00 USDC** |
 
 Balance unchanged: $9.98 → $9.98
@@ -156,7 +170,7 @@ Balance unchanged: $9.98 → $9.98
 
 | Provider / Feature | Endpoint | Est. Cost | Status |
 |-------------------|----------|-----------|--------|
-| Laso Auth | `/x402/laso-auth` | $0.001 | ❌ Broken (500) |
-| Laso Prepaid Card | `/x402/laso-get-card` | $5–$1000 | ⬜ Untestable |
+| Laso Auth | `/x402/laso-auth` | $0.001 | ❌ Broken (500) — confirmed on re-test |
+| Laso Prepaid Card | `/x402/laso-get-card` | $5–$1000 | ⬜ Untestable (works via Sponge) |
 | Laso Send Payment | `/x402/laso-send-payment` | $5–$1000 | ⬜ Untestable |
 | Laso Free endpoints | `laso.finance/*` | Free | ⬜ Blocked by auth |
