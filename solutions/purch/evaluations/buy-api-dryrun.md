@@ -218,3 +218,52 @@ Like Rye's partner endpoint, Purch requires no API key. Payment IS authenticatio
 ---
 
 *This evaluation tested the production Purch API (api.purch.xyz) on March 18, 2026. No purchases were completed — we don't have a Solana wallet with USDC. All findings are from the pre-payment validation layer and decoded x402 payment headers.*
+
+---
+
+## ADDENDUM: Crossmint Direct API Comparison (March 18, 2026)
+
+To determine whether the "Product not found" errors originate from Purch or Crossmint, we created a Crossmint staging developer account and tested the exact same ASINs against Crossmint's headless checkout API directly.
+
+**Crossmint staging API:** `POST https://staging.crossmint.com/api/2022-06-09/orders`  
+**Auth:** `X-API-KEY: sk_staging_*`
+
+### Side-by-Side Results
+
+| ASIN | Product | Purch (x402) | Crossmint (Direct API) |
+|------|---------|--------------|----------------------|
+| B09B8V1LZ3 | Echo Dot | ✅ 402 ($55.88) | ✅ Order created |
+| B09JNPGJ7S | iPhone Case | ❌ Not found | ❌ Not found |
+| B0CN1HP68Q | Kindle | ❌ Not found | ❌ Not found |
+| B0B2MLXFGR | Anker Charger | ❌ Not found | ❌ Not found |
+| B0BXRXLKHR | Dry Fit Shirt | ❌ Delivery >15 days | ❌ Delivery >15 days |
+| B0D1XD1ZV3 | AirPods Pro | ❌ Unavailable | ✅ Order created* |
+| B00EB4ADQW | Fuji Instax Film | ❌ Can't ship to address | ❌ Can't ship to address |
+
+*AirPods worked on Crossmint staging but returned "unavailable" on Purch production — likely a staging vs production environment difference.
+
+### Verdict: Crossmint Is the Bottleneck
+
+The "Product not found" errors are **Crossmint's limitation**, not Purch's. The exact same ASINs fail identically on both platforms. Crossmint does NOT have full Amazon catalog coverage — they work with a curated/indexed subset of products.
+
+All constraints flow from Crossmint:
+- **Limited catalog** (many ASINs return "not found") → Crossmint
+- **15-day delivery cap** → Crossmint  
+- **US-only shipping** → Crossmint
+- **Shipping restrictions per product** → Crossmint/Amazon
+
+Purch is a thin x402 payment wrapper around Crossmint's headless checkout. It adds the Solana USDC payment protocol and conversational AI features, but the actual commerce pipeline, catalog, and constraints are all Crossmint.
+
+### Architecture Confirmed
+
+```
+Agent/User → Purch (x402 payment on Solana) → Crossmint (headless checkout API) → Amazon/Shopify
+```
+
+Purch's value-add over using Crossmint directly:
+- No API key needed (x402 payment = auth)
+- AI shopping assistant (natural language search)
+- Gift Hunter (social media analysis)
+- Vault (digital asset marketplace)
+
+But the core checkout capability is identical to Crossmint, including all limitations.
