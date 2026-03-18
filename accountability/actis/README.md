@@ -91,6 +91,158 @@ ACTIS provides exactly these four properties and nothing more.
 
 ACTIS is **only the evidence layer**. It proves the record is intact, not that the transaction was correct.
 
+### Cryptographic Stack
+
+ACTIS uses deliberately simple, widely available cryptography. No ZK proofs, no blockchain, no trusted setup.
+
+| Primitive | Standard | Purpose |
+|-----------|----------|---------|
+| **SHA-256** | NIST FIPS 180-4 | Hash chain linking, file checksums, final hash seal |
+| **Ed25519** | RFC 8032 | Per-round digital signatures (participant authorization) |
+| **RFC 8785 (JCS)** | JSON Canonicalization Scheme | Deterministic serialization so hashes are reproducible across implementations |
+| **Base58** | Bitcoin-style encoding | Public keys and signature encoding |
+
+That's the entire crypto stack. Every primitive is available in every language's standard library. No specialized circuits, no prover infrastructure, no trusted setup ceremonies.
+
+**Why not ZK proofs?** ZK solves a different problem — proving you know something *without revealing it*. ACTIS has the opposite goal: **full transparency**. The whole point is that anyone can read every round, verify every hash, check every signature. There's nothing to hide.
+
+### What ACTIS Can Verify
+
+| Check | What It Proves | Example |
+|-------|---------------|---------|
+| **Hash chain intact** | No rounds were added, removed, reordered, or modified after recording | "The transcript shows round 3 was a BID of $49.99 — and no one changed that number after the fact" |
+| **Signatures valid** | The stated party (public key) authorized each round | "The agent identified by key `7nYBb...` signed the ACCEPT round" |
+| **Bundle integrity** | The ZIP file hasn't been corrupted or selectively edited | "The transcript file inside the bundle matches its recorded checksum" |
+| **Final hash seal** | The entire transcript hasn't been modified since it was sealed | "This is the complete, unaltered record" |
+| **Evidence completeness** | All referenced evidence artifacts are present in the bundle | "No one stripped attachments from the bundle after the fact" |
+
+### What ACTIS Cannot Verify
+
+| Non-check | Why Not | What Would Be Needed |
+|-----------|---------|---------------------|
+| **Was the agent's decision correct?** | ACTIS records WHAT happened, not WHETHER it was right | Application-layer business logic, auditor judgment |
+| **Did the agent get a good price?** | ACTIS doesn't know market prices | External price oracle or benchmark |
+| **Is the signer who they claim to be?** | ACTIS verifies key → signature, not key → real-world identity | PKI, DID, or identity provider |
+| **Did the counterparty actually deliver?** | ACTIS records the negotiation, not the fulfillment | Order tracking, delivery confirmation system |
+| **Is this the ONLY transcript?** | A bad actor could produce two valid transcripts for the same deal (equivocation attack) | Transparency log, bilateral counter-signing |
+| **Was anything omitted BEFORE recording?** | The producer controls what rounds go into the transcript | Higher-level protocol commitments |
+| **Are the timestamps real?** | Timestamps come from the producer, not an external clock | Trusted timestamping service (RFC 3161) |
+| **Is the content truthful?** | ACTIS verifies `message_hash` exists, not that the message is true | Out of scope — application-layer concern |
+
+### The One-Sentence Summary
+
+ACTIS answers one question: **"Given this record of what an agent did, can we prove the record hasn't been tampered with?"** Everything else — identity, correctness, reputation, adjudication — is explicitly out of scope.
+
+---
+
+## Real-World Use Cases
+
+### Use Case 1: Agent Overpaid — Dispute Resolution
+
+```
+Your agent bought office supplies via Rye/Purch/Sponge.
+The invoice says $500. You think it should have been $300.
+
+Without ACTIS:
+  - You check the platform's logs (but they control those logs)
+  - You check your agent's logs (but those are just your side)
+  - Nobody has a mutually trusted record
+  - It's your word vs theirs
+
+With ACTIS:
+  - Both sides have a signed transcript bundle
+  - Round 1 (ASK):        Seller offered at $500
+  - Round 2 (COUNTER):    Your agent countered at $250
+  - Round 3 (COUNTER):    Seller countered at $300
+  - Round 4 (ACCEPT):     Your agent accepted $300
+  - Round 5 (SETTLEMENT): Payment executed for $500  ← MISMATCH
+
+  - Any third party can verify the bundle offline
+  - The hash chain proves round 4 accepted $300
+  - The signature proves YOUR agent signed that acceptance
+  - Now you have cryptographic evidence the settlement
+    didn't match the agreed terms
+```
+
+### Use Case 2: Regulatory Compliance (EU AI Act)
+
+```
+EU AI Act requires "traceability" for high-risk AI systems.
+A regulator asks: "Show me what your agent did."
+
+Without ACTIS:
+  - Export application logs (mutable, not standardized)
+  - Auditor has to trust your infrastructure
+  - No way to prove logs weren't modified after the fact
+
+With ACTIS:
+  - Hand over the bundle.zip
+  - Regulator runs their own verifier (Rust, TypeScript, or Python)
+  - Gets ACTIS_COMPATIBLE → record is structurally intact
+  - Can read every round of the transaction in plain JSON
+  - No trust in your infrastructure needed
+  - Standardized format — same verifier works for any ACTIS producer
+```
+
+### Use Case 3: Multi-Agent Negotiation
+
+```
+Agent A (buyer) and Agent B (seller) negotiate a deal.
+Later, Agent B claims different terms were agreed.
+
+Without ACTIS:
+  - Each agent has its own logs
+  - Logs disagree
+  - No resolution possible
+
+With ACTIS:
+  - Both agents sign each round with their Ed25519 keys
+  - Agent A signed ACCEPT on specific terms
+  - Agent B signed the ASK with those same terms
+  - The hash chain links them in order
+  - A third party can verify both signatures offline
+  - The signed record IS the agreement — cryptographic proof
+    of who said what and when
+```
+
+### Use Case 4: Audit Trail for Autonomous Procurement
+
+```
+A company deploys agents to autonomously procure cloud
+infrastructure, negotiate SaaS contracts, or purchase supplies.
+
+CFO asks: "What did our agents commit us to this quarter?"
+
+Without ACTIS:
+  - Scattered logs across multiple platforms
+  - Each platform has its own format
+  - No guarantee logs are complete or unmodified
+
+With ACTIS:
+  - Each procurement generates a sealed bundle
+  - Bundles are standardized (same format, same verifier)
+  - Auditor batch-verifies all bundles
+  - Can reconstruct the full decision trail:
+    what was offered, what was countered, what was accepted
+  - Signatures prove which agent authorized each commitment
+```
+
+### When ACTIS Is Useful vs Unnecessary
+
+**Useful when:**
+- Agents transact across **trust boundaries** (different owners, different platforms)
+- **Disputes are possible** and need resolution with evidence
+- **Regulators** require standardized audit trails (EU AI Act, NIST AI RMF)
+- You need a **format multiple parties can verify independently**
+- Transactions are **high-value enough** to warrant formal evidence
+
+**Unnecessary when:**
+- All agents are under your control (just use your own logs)
+- Transactions are low-value and disputes don't matter
+- You already have on-chain settlement that serves as the record (e.g., everything on a blockchain already)
+- There's no counterparty (single-agent actions with no dispute risk)
+- You need real-time enforcement, not after-the-fact evidence
+
 ---
 
 ## Architecture Overview
