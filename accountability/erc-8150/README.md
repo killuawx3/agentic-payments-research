@@ -442,9 +442,65 @@ Alice (user)              Agent (AI)               Agent Wallet (chain)     USDC
 | **Identity of counterparties** | Proves user signed, not who the recipients are | External identity/KYC layer |
 | **Post-execution correctness** | Proves execution matched intent, not that the outcome was good | Outcome validation, price impact checks |
 
+### Plain-Language Scenarios
+
+**Scenarios where ERC-8150 saves you:**
+
+```
+1. Agent gone rogue
+   You told the agent to pay 3 vendors. The agent tries to also
+   send 10,000 USDC to its operator's wallet.
+   → ZK proof fails (extra transfer not in intent) → REVERT. Zero funds lost.
+
+2. Agent hallucinated an amount
+   Agent meant to send $50 but the LLM outputted $5,000 in the calldata.
+   → ZK proof fails (amount doesn't match signed intent) → REVERT.
+
+3. Replay attack
+   Someone captures the agent's previous valid proof+tx and resubmits it.
+   → Nonce already consumed → REVERT.
+
+4. Agent compromised after signing
+   Attacker gets access to the agent after user signed, tries to
+   change recipients.
+   → ZK proof fails (recipients don't match commitment) → REVERT.
+```
+
+**Scenarios where ERC-8150 does NOT save you:**
+
+```
+1. Agent proposes a bad deal
+   Agent suggests buying a token at 50% above market price.
+   User signs without checking. ERC-8150 faithfully executes the bad trade.
+   → ERC-8150 enforces what you approved, not whether it was smart.
+
+2. Social engineering
+   Malicious agent shows "Send 100 USDC to Vendor" but the actual
+   intent bundle says "Send 100 USDC to Attacker."
+   User signs without reading the EIP-712 details.
+   → ERC-8150 can't protect users from signing things they didn't read.
+
+3. Front-running / MEV
+   Agent submits the proven transaction. A MEV bot sees it in the
+   mempool and front-runs.
+   → ERC-8150 doesn't touch mempool privacy. Need Flashbots etc.
+
+4. You need to do something other than ERC-20 transfers
+   Agent needs to call Uniswap swap(), stake on Aave, mint an NFT.
+   → ERC-8150 v1 only supports ERC20_TRANSFER. Can't help.
+
+5. Cross-chain agent
+   Agent operates on Ethereum AND Arbitrum AND Base.
+   → Each intent is single-chain. No atomic cross-chain support.
+```
+
 ### The Honest Assessment
 
 ERC-8150 is strong at **constraining what an agent CAN do** (enforcement). It's not designed for proving what an agent DID do after the fact (evidence/audit). It prevents bad transactions before they happen, rather than documenting them after.
+
+**The biggest current limitation:** only `ERC20_TRANSFER` is supported. No swaps, no staking, no approvals, no arbitrary contract calls. This means the DeFi portfolio rebalancing use case — the motivating example in the spec — actually can't be fully implemented yet. The standard would need extension to action types like `ERC20_APPROVE`, `UNISWAP_SWAP`, or a generic `ARBITRARY_CALL` (which introduces much harder verification problems).
+
+**The gas overhead reality:** 345,000 gas for ZK verification is roughly $1-3 on Ethereum mainnet at current prices. This makes single transfers uneconomical (a normal transfer is ~65k gas). The break-even is around 3-5 transfers per batch where the per-transfer cost dilutes the fixed overhead enough to be worth the security guarantee.
 
 ---
 
@@ -648,15 +704,61 @@ change amounts or add extra recipients.
 ### Use Case 3: Agent-Mediated E-Commerce Settlement
 
 ```
-Shopping agent negotiates deals with 3 vendors.
+Shopping agent (on Sponge/Locus) negotiates deals with 3 vendors.
 Total settlement: 195 USDC across 3 recipients.
 
-User reviews final intent bundle.
-Signs once.
-Agent handles settlement atomically.
+Without ERC-8150:
+  Option A: Give the agent your wallet key → custodial risk
+  Option B: Agent proposes, you sign 3 separate transactions → defeats automation
+  Option C: Use spending limits → agent could send to wrong recipients within limit
 
-Without ERC-8150: User approves each vendor payment individually.
-With ERC-8150: One signature, one proof, one atomic execution.
+With ERC-8150:
+  Agent proposes intent bundle with exact recipients + amounts.
+  You review once, sign once.
+  Agent generates ZK proof, submits.
+  All 3 transfers execute atomically.
+  Agent can't change a single recipient or amount.
+```
+
+### Use Case 4: DAO Treasury Agent
+
+```
+A DAO votes to allocate funds. An AI agent executes the allocation.
+
+Intent bundle:
+  - 50,000 USDC → Development team multisig
+  - 20,000 USDC → Marketing budget wallet
+  - 10,000 USDC → Auditor payment address
+  - 5,000 USDC → Community grants pool
+
+DAO multisig signs the bundle.
+Agent executes with ZK proof.
+
+Why this matters:
+  - DAO members can verify the EXACT allocation was executed
+  - Agent can't skim, reroute, or add extra recipients
+  - Atomic: if one transfer fails (e.g., contract paused), ALL revert
+  - No trust in the agent operator required
+```
+
+### Use Case 5: Subscription/Recurring Payments via Agent
+
+```
+User authorizes agent to make monthly SaaS payments:
+
+Month 1 intent bundle:
+  - 99 USDC → Notion (0xNotion)
+  - 20 USDC → GitHub Copilot (0xGitHub)
+  - 49 USDC → Vercel (0xVercel)
+
+User signs. Agent executes.
+
+Next month, agent proposes a new bundle (amounts may change).
+User reviews and signs again.
+
+Key: user re-approves each month's exact amounts.
+Agent can't auto-escalate prices or add new services
+without a new signature.
 ```
 
 ### When ERC-8150 Is Useful vs Unnecessary
@@ -665,16 +767,20 @@ With ERC-8150: One signature, one proof, one atomic execution.
 - Agent handles **on-chain ERC-20 transfers** on your behalf
 - You want to **batch-approve** multiple transactions with one signature
 - **Non-custodial** control matters (funds stay in your wallet)
-- You need **mathematical guarantees** the agent can't deviate
+- You need **mathematical guarantees** the agent can't deviate from approved actions
 - **Atomic execution** matters (all-or-nothing for a batch)
 - Intent **privacy** matters (details stay off-chain via ZK)
+- **Multiple recipients** in one batch (amortizes the 345k gas overhead)
+- Trust boundary exists between you and the agent operator
 
 **Unnecessary when:**
-- Single transactions (overhead not worth it)
-- You already trust the agent fully (e.g., your own infrastructure)
-- Off-chain transactions (ERC-8150 is on-chain only)
-- Non-ERC20 actions (currently unsupported — only `ERC20_TRANSFER`)
-- L2s with cheap gas (the 345k overhead matters less but ZK complexity remains)
+- **Single transactions** (345k gas overhead makes it 5x more expensive than a direct transfer)
+- You **already trust the agent fully** (e.g., your own infrastructure, same org)
+- **Off-chain transactions** (ERC-8150 is on-chain Ethereum only)
+- **Non-ERC20 actions** needed (swaps, staking, NFT mints — only `ERC20_TRANSFER` supported today)
+- Agent needs to make **dynamic decisions** (ERC-8150 requires pre-approval of exact amounts — can't handle "buy ETH at best available price")
+- **Speed matters** — 15-20 seconds end-to-end (proof generation + block confirmation) may be too slow for time-sensitive trades
+- **L2 with cheap gas** — the security guarantee still holds but the gas overhead matters less, and the ZK circuit complexity remains
 
 ---
 
