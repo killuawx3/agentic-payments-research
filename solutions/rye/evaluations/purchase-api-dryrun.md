@@ -187,11 +187,20 @@ Inspected `https://mcp.rye.com/bt-card-capture`:
 | maxTotalPrice constraint accepted | ✅ Confirmed |
 | Clean validation errors for bad input | ✅ Confirmed |
 
+## Geographic Restrictions — Confirmed
+
+Amazon orders through Rye are **US and Canada only**. Rye places orders through their own Amazon account with Prime shipping, which is limited to North American addresses. Attempted to complete a real purchase (Amazon ASIN B0BXRXLKHR, ~$1 dry-fit shirt) but could not proceed — the buyer had no US shipping address available. International buyers would need a US mail forwarding service or a US-based recipient.
+
+This is a hard constraint of Rye's architecture: since they proxy orders through their own Amazon account (not the buyer's), shipping destinations are bound by that account's Prime eligibility.
+
+---
+
 ## What Remains Untested
 
 | Feature | Reason |
 |---------|--------|
-| Successful order completion | Requires real BT token (real card) |
+| Successful order completion | Requires real BT token + US address |
+| International shipping | ❌ Not supported for Amazon (US/Canada only) |
 | Shopify product URLs | Only tested Amazon |
 | AI Browser Flows (non-Amazon/Shopify) | Not tested |
 | Token reuse for repeat purchases | No token saved |
