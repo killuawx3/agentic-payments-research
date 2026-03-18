@@ -826,6 +826,171 @@ The source code reveals broader merchant support than the public docs suggest:
 
 The `url:` prefix means Crossmint will attempt browser automation checkout — so Purch theoretically supports **any merchant** where Crossmint's browser automation works, not just Amazon and Shopify.
 
+---
+
+## Crossmint: The Commerce Engine Under the Hood
+
+Purch delegates all actual commerce to **Crossmint's Headless Checkout API** (`POST /api/2022-06-09/orders`). Understanding Crossmint is essential to understanding how Purch actually fulfills orders.
+
+### What Crossmint Is
+
+Crossmint is an all-in-one platform for integrating stablecoins, wallets, and commerce into products. Their Headless Checkout API is a universal order API that handles:
+
+1. **Product resolution** — resolves product locators to actual items on merchant platforms
+2. **Pricing & quotes** — fetches live pricing, calculates tax, determines shipping costs
+3. **Payment processing** — supports crypto (50+ blockchains) AND fiat (cards, Apple Pay, Google Pay)
+4. **Order placement** — places orders on merchants via API integrations or browser automation
+5. **Delivery tracking** — tracks fulfillment status through to completion
+
+### Crossmint Order Lifecycle
+
+```
+POST /api/2022-06-09/orders
+  { recipient, payment, lineItems: [{ productLocator }] }
+        |
+        v
++-------+--------+
+| Quote Phase     |  Crossmint fetches live pricing:
+|                 |  - Product price
+| quote.status:   |  - Sales tax
+|   "valid"       |  - Shipping cost
+|   "expired"     |  - Total price
+|   "all-line-    |
+|    items-       |  Returns: quote.totalPrice
+|    unavailable" |          quote.charges (unit, tax, shipping)
++-------+--------+
+        |
+        v
++-------+--------+
+| Payment Phase   |  For crypto: returns serializedTransaction
+|                 |  Agent signs + submits on-chain
+| payment.status: |
+|  "awaiting-     |  For fiat: card charge processed
+|   payment"      |
+|  "in-progress"  |  For credit: deducted from Crossmint balance
+|  "completed"    |
+|  "failed"       |
++-------+--------+
+        |
+        v
++-------+--------+
+| Delivery Phase  |  Order placed on merchant site
+|                 |  (API integration or browser automation)
+| delivery.status:|
+|  "awaiting-     |  Merchant fulfills and ships
+|   payment"      |
+|  "in-progress"  |  Tracking available via GET /orders/{id}
+|  "completed"    |
+|  "failed"       |
++-------+--------+
+        |
+        v
++-------+--------+
+| Order Complete  |  phase: "completed"
+|                 |  Buyer receives product
++-----------------+
+```
+
+### Crossmint Product Locator Format
+
+The `productLocator` string in `lineItems` tells Crossmint which platform and product to purchase:
+
+| Prefix | Platform | Example | Fulfillment Method |
+|--------|----------|---------|-------------------|
+| `amazon:` | Amazon | `amazon:B01DFKC2SO` or `amazon:https://amazon.com/dp/B01DFKC2SO` | Amazon API integration |
+| `shopify:` | Shopify | `shopify:https://store.com/products/item:variantId` | Shopify Storefront API |
+| `url:` | Any website | `url:https://nike.com/t/shoe-name:size-9` | Browser automation |
+
+**Variant specification by platform:**
+- **Amazon:** URL is sufficient (variant embedded in ASIN/URL)
+- **Shopify:** Variant ID appended after colon: `shopify:{url}:{variantId}`
+- **Browser Automation:** Variant appended naturally: `url:{url}:size-9` or as JSON object
+
+**Constraint:** A single order can include multiple products only if **all items are from the same platform**.
+
+### Crossmint Payment Methods
+
+Crossmint supports far more payment methods than Purch exposes:
+
+#### Crypto Payments
+
+| Chain | Currencies | Method String |
+|-------|-----------|---------------|
+| **Solana** | SOL, USDC, BONK | `solana` |
+| **Ethereum** | ETH, USDC | `ethereum` |
+| **Base** | ETH, USDC | `base` |
+| **Polygon** | MATIC, USDC | `polygon` |
+| **50+ other chains** | Various | Chain-specific |
+
+For crypto, Crossmint returns a `serializedTransaction` — a pre-built blockchain transaction that the payer signs and submits. The payer address is specified in the request.
+
+#### Fiat Payments
+
+| Method | Currencies |
+|--------|-----------|
+| **Credit/Debit Card** | USD, EUR, AUD, GBP, JPY, SGD, HKD, KRW, INR, VND |
+| **Apple Pay** | Same as card |
+| **Google Pay** | Same as card |
+| **BasisTheory Token** | Card tokenization |
+
+#### Platform Credit
+
+| Method | Description |
+|--------|-------------|
+| **Credit** | Pre-funded Crossmint account balance — no on-chain transaction needed |
+
+**What Purch uses:** Only `solana` + `usdc`. But anyone building directly on Crossmint could use any of the above — including credit cards, Apple Pay, or ETH on Base.
+
+### What This Means for Purch's Architecture
+
+```
++---------------------------------------------------------------------+
+|                    THE FULL STACK                                     |
+|                                                                      |
+|  +------------------+                                                |
+|  |   AI Agent       |  Has USDC on Solana                           |
+|  +--------+---------+                                                |
+|           |                                                          |
+|           | x402 ($0.01 USDC)                                        |
+|           v                                                          |
+|  +--------+---------+                                                |
+|  |   Purch API      |  Thin wrapper:                                 |
+|  |                  |  - x402 auth (Coinbase CDP)                    |
+|  |  What it does:   |  - URL → productLocator resolution             |
+|  |  - Accept x402   |  - Forward to Crossmint                       |
+|  |  - Resolve URLs  |  - Persist order in Supabase                   |
+|  |  - Call Crossmint|                                                |
+|  |  - Store orders  |  What it does NOT do:                          |
+|  +--------+---------+  - Product lookup/pricing                      |
+|           |             - Tax/shipping calculation                    |
+|           |             - Payment processing                         |
+|           | Crossmint API Key                                        |
+|           v             - Order placement on merchant                |
+|  +--------+---------+  - Fulfillment tracking                        |
+|  |  Crossmint       |                                                |
+|  |  Headless         |                                                |
+|  |  Checkout API    |  Does ALL the heavy lifting:                   |
+|  |                  |  - Product resolution                          |
+|  |  POST /api/      |  - Quote (price + tax + shipping)              |
+|  |  2022-06-09/     |  - Builds serializedTransaction                |
+|  |  orders          |  - Processes payment (crypto/fiat)              |
+|  |                  |  - Places order on merchant                    |
+|  |                  |  - Tracks delivery                              |
+|  +--------+---------+                                                |
+|           |                                                          |
+|           | API integration or browser automation                    |
+|           v                                                          |
+|  +--------+---------+                                                |
+|  |  Merchant        |  Amazon, Shopify, Nike, Adidas,                |
+|  |  (fulfillment)   |  Crocs, Gymshark, On, + any URL                |
+|  +------------------+                                                |
++---------------------------------------------------------------------+
+```
+
+**Key takeaway:** Purch's proprietary value is the **x402 payment layer** and the **AI product discovery** (search, shop, gift hunter). The actual commerce (checkout, payment, fulfillment) is entirely Crossmint. Anyone could build a Purch competitor by wrapping Crossmint's API with a different payment/auth mechanism.
+
+---
+
 ## Technology Stack
 
 | Component | Technology |
@@ -1006,23 +1171,93 @@ User                         Purch Gift Hunter           Social Platform
 
 ---
 
-## Purch vs Rye: Key Differences
+## Purch vs Rye: Architectural Comparison
+
+### The Fundamental Difference
+
+Both Purch and Rye solve the same problem (agent → product URL → purchased order) but with completely different architectures:
+
+```
+RYE ARCHITECTURE:                    PURCH ARCHITECTURE:
+
+Agent                                Agent
+  |                                    |
+  | API key + card token               | x402 USDC payment ($0.01)
+  v                                    v
++----------+                         +-----------+
+| Rye API  |                         | Purch API |  (thin wrapper)
+|          |                         |           |
+| - Own    |                         | - x402    |
+|   checkout                         |   auth    |
+|   engine |                         | - URL     |
+| - RyeBot |                         |   resolve |
+|   (web   |                         +-----------+
+|   agent) |                               |
+| - Own    |                               | Crossmint API key
+|   payment|                               v
+|   proc.  |                         +-----------+
++----------+                         | Crossmint |  (does everything)
+  |                                  | Headless  |
+  | RyeBot navigates                | Checkout  |
+  | merchant sites                   +-----------+
+  v                                        |
+Merchant                                   | API or browser automation
+                                           v
+                                     Merchant
+```
+
+**Rye owns the full stack** — product validation, pricing, checkout automation (RyeBot), payment processing, order placement, and tracking. It's a vertically integrated checkout engine.
+
+**Purch is a thin x402 layer on top of Crossmint** — it adds crypto payment authentication and product discovery, but delegates all commerce mechanics (pricing, tax, shipping, checkout, fulfillment) to Crossmint's Headless Checkout API.
+
+### Feature Comparison
 
 | Dimension | Purch | Rye |
 |-----------|-------|-----|
-| **Payment** | USDC on Solana (x402 protocol) | Credit card (Stripe/BasisTheory tokens) |
-| **Auth model** | No API keys — payment proof IS auth | API key (Basic auth) |
-| **API pricing** | Per-call x402 micropayments ($0.01-$0.10 + product cost) | $149/month subscription + 3% Amazon fee |
-| **Merchants** | Amazon + Shopify | Amazon + Shopify + Best Buy + thousands more |
-| **Checkout model** | Single-step (pay + buy in one call) | Two-step (create intent → confirm) or single-step |
-| **Product discovery** | Built-in AI shopping assistant (NLP) + structured search | Product lookup by URL only (no search/discovery) |
-| **Unique features** | Gift Hunter (social media analysis), Vault (AI agent marketplace) | Promo code auto-discovery, variant selection, shipment tracking |
+| **Commerce engine** | Crossmint (third-party) | Own (RyeBot, proprietary) |
+| **Payment rails** | USDC on Solana (x402 protocol) | Credit card (Stripe/BasisTheory tokens) |
+| **Auth model** | No API keys — x402 payment proof IS auth | API key (Basic auth) |
+| **API pricing** | Per-call micropayments ($0.01 API fee + product cost) | $149/month subscription + 3% Amazon fee |
+| **Merchants (documented)** | Amazon + Shopify | Amazon + Shopify + Best Buy + thousands more |
+| **Merchants (actual)** | Amazon + Shopify + Nike, Adidas, Crocs, Gymshark, On + any URL (via Crossmint browser automation) | Any merchant RyeBot can navigate |
+| **Checkout model** | Two-phase: $0.01 x402 fee → then sign Crossmint's serialized tx for product cost | Two-step (create intent → confirm) or single-step |
+| **Product discovery** | Built-in AI shopping assistant + structured search | Product lookup by URL only (no search) |
+| **Promo codes** | None | Manual (16 max) + auto-discovery |
+| **Price constraints** | None (implicit via wallet balance) | `maxTotalPrice` enforcement |
+| **Unique features** | Gift Hunter (social media → gifts), Vault (AI agent marketplace), x402 Bazaar discovery | Promo auto-discovery, variant selection, shipment tracking, Clawdbot skill |
 | **Settlement** | Crypto only (USDC/Solana) | Fiat only (credit cards) |
-| **Target user** | Crypto-native agents and users | Traditional web developers and AI apps |
-| **Webhooks** | Not documented | Not available (polling) |
 | **SDKs** | None (REST + x402) | TypeScript, Python, Ruby, Java |
+| **Agent skill** | None | Clawdbot (buy-anything) |
 | **Rate limits** | Not documented | 5 req/sec, 50 req/day |
-| **Geography** | Not documented (likely US for Amazon) | US only |
+| **Geography** | US (Amazon) + worldwide (Shopify) per Crossmint | US only |
+| **Order status auth** | bcrypt-hashed client secret | Poll via API key |
+
+### What Each Platform Actually Owns
+
+| Capability | Rye | Purch | Purch's Actual Provider |
+|------------|-----|-------|------------------------|
+| **Product resolution** | Rye (own engine) | Crossmint | Crossmint |
+| **Price/tax/shipping** | Rye (own engine) | Crossmint | Crossmint |
+| **Checkout automation** | RyeBot (own web agent) | Crossmint | Crossmint browser automation |
+| **Payment processing** | Stripe/BasisTheory (via Rye's Stripe account) | x402 (API fee) + Crossmint (product payment) | Coinbase CDP + Crossmint |
+| **Order tracking** | Rye API | Crossmint (proxied through Purch) | Crossmint |
+| **Product search** | None | Purch (own AI) | Purch |
+| **AI recommendations** | None | Purch (own AI) | Purch |
+| **Gift suggestions** | None | Purch (own AI) | Purch |
+| **Vault marketplace** | None | Purch (own) | Purch |
+| **x402/crypto auth** | None | Purch + Coinbase CDP | Coinbase CDP |
+
+### Implications
+
+**For builders choosing between them:**
+- If you want to **build on top of** a checkout API with full control, Rye gives you more — own engine, SDKs, promo codes, price constraints, agent skill
+- If you want **zero-setup crypto-native** checkout, Purch is simpler — just have USDC and call the API
+- If you want **both crypto and fiat**, skip Purch and integrate Crossmint directly — it supports 50+ chains, credit cards, Apple Pay, Google Pay
+
+**For understanding the market:**
+- Rye is a **vertically integrated checkout company** that built its own commerce engine
+- Purch is an **x402 wrapper + AI discovery layer** built on Crossmint's infrastructure
+- Crossmint is the **underlying platform** that could power many Purch-like services
 
 ---
 

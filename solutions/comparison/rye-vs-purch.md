@@ -533,22 +533,109 @@ However, the comparison isn't clean because:
 
 ---
 
-## 11. Design Philosophy Summary
+## 11. Under the Hood: Who Owns What
+
+Source code analysis of Purch (`purch-xyz/x-purch`) reveals a critical architectural difference: **Rye owns its commerce engine; Purch delegates to Crossmint.**
+
+### Stack Ownership
+
+```
+RYE (vertically integrated):         PURCH (layered on Crossmint):
+
++---------------------------+        +---------------------------+
+| Rye API                   |        | Purch API                 |
+| - Own checkout engine     |        | - x402 auth (Coinbase CDP)|
+| - RyeBot (web agent)     |        | - URL → locator resolution|
+| - Own payment processing  |        | - AI product discovery    |
+| - Own order management    |        | - Vault marketplace       |
+| - Promo code engine       |        +-------------+-------------+
+| - Shipment tracking       |                      |
++---------------------------+                      | Crossmint API
+         |                                         v
+         |                           +---------------------------+
+         | RyeBot navigates          | Crossmint Headless API    |
+         | merchant sites            | - Product resolution      |
+         v                           | - Quote (price/tax/ship)  |
+    Merchant                         | - Payment processing      |
+                                     | - Browser automation      |
+                                     | - Order placement         |
+                                     | - Delivery tracking       |
+                                     +-------------+-------------+
+                                                   |
+                                              Merchant
+```
+
+### What Each Platform Actually Builds vs Delegates
+
+| Capability | Rye | Purch | Purch's Actual Provider |
+|------------|-----|-------|------------------------|
+| **Product resolution** | Own engine | Delegates | Crossmint |
+| **Price/tax/shipping** | Own engine | Delegates | Crossmint |
+| **Checkout automation** | RyeBot (own web agent) | Delegates | Crossmint browser automation |
+| **Payment processing** | Stripe/BT (via Rye's account) | x402 fee only ($0.01) | Crossmint (product payment) |
+| **Order tracking** | Own API | Proxies | Crossmint |
+| **Product search/AI** | None | **Own** | Purch |
+| **Social gifting** | None | **Own** | Purch |
+| **Vault marketplace** | None | **Own** | Purch |
+| **x402 crypto auth** | None | **Own** | Coinbase CDP |
+
+### Purch's Two-Phase Payment (From Source Code)
+
+Purch's payment is NOT a single atomic transaction as the public docs suggest:
+
+```
+Phase 1: x402 API Fee ($0.01 USDC → Purch's wallet)
+    Coinbase CDP facilitator verifies payment
+    This authenticates the API call
+        |
+        v
+Phase 2: Product Payment (dynamic USDC → Crossmint)
+    Crossmint returns a serializedTransaction
+    Agent signs and submits this separate Solana transaction
+    This pays actual product cost (price + tax + shipping)
+```
+
+### Purch's Actual Merchant Coverage (From Source Code)
+
+The source code reveals hardcoded browser automation support beyond Amazon/Shopify:
+
+| Category | Merchants | Locator Prefix |
+|----------|-----------|---------------|
+| **Amazon** | All Amazon domains + a.co, amzn.to short URLs | `amazon:` |
+| **Shopify** | Any .myshopify.com or `/products/` path | `shopify:` |
+| **Browser Automation** | Nike, Adidas, Crocs, Gymshark, On Running | `url:` |
+| **Fallback** | Any HTTPS URL | `url:` (Crossmint attempts browser automation) |
+
+### What Crossmint Could Do That Purch Doesn't Expose
+
+Crossmint supports payment methods Purch ignores:
+- **Fiat:** Credit cards, Apple Pay, Google Pay (USD, EUR, GBP, JPY, etc.)
+- **Multi-chain crypto:** Ethereum, Base, Polygon, 50+ chains (not just Solana)
+- **Platform credit:** Pre-funded Crossmint balance
+
+Anyone could build a "Purch alternative" by wrapping Crossmint with a different auth/payment layer — e.g., fiat-based, multi-chain, or API-key-based.
+
+---
+
+## 12. Design Philosophy Summary
 
 | Dimension | Rye | Purch |
 |-----------|-----|-------|
 | **Core metaphor** | "Universal checkout pipe" | "AI shopping concierge" |
+| **Architecture** | Vertically integrated (own engine) | Thin wrapper on Crossmint |
 | **Payment philosophy** | Fiat-first (cards, tokens, traditional rails) | Crypto-first (USDC, x402, on-chain settlement) |
 | **Auth philosophy** | Traditional (API keys, Basic auth) | Payment IS auth (no keys) |
-| **Merchant philosophy** | Universal (any merchant via web agent) | Focused (Amazon + Shopify only) |
+| **Merchant philosophy** | Universal (any merchant via own web agent) | Depends on Crossmint's browser automation reach |
 | **Discovery philosophy** | Not our problem (URL in, order out) | Built-in (NLP search, AI recs, social analysis) |
 | **Agent philosophy** | Skill + SDKs (teach the agent) | Raw API (agent figures it out) |
 | **Pricing philosophy** | Subscription (predictable monthly cost) | Micropayments (pay exactly what you use) |
-| **Unique value** | Merchant breadth + checkout reliability | Discovery + crypto-native + Vault marketplace |
+| **Unique value** | Own checkout engine + merchant breadth + reliability | AI discovery + crypto-native + Vault + Bazaar discoverability |
+| **Proprietary moat** | RyeBot checkout engine | AI product discovery + x402 UX |
+| **Substitutability** | Hard to replace (own engine) | Commerce layer replaceable (any Crossmint client could do it) |
 
 ---
 
-## 12. When to Use Which
+## 13. When to Use Which
 
 **Choose Rye when:**
 - You need **broad merchant coverage** beyond Amazon/Shopify (Best Buy, DTC brands, etc.)
@@ -557,8 +644,9 @@ However, the comparison isn't clean because:
 - You want **promo code auto-discovery** to reduce costs
 - You need **SDKs** (TypeScript, Python, Ruby, Java) for structured integration
 - You want an **agent skill** (Clawdbot) with saved credentials and repeat purchases
-- **Checkout reliability** matters (90%+ claimed, RyeBot web agent)
+- **Checkout reliability** matters (90%+ claimed, own RyeBot engine)
 - You're building a product where **monthly subscription** is acceptable ($149/month)
+- You want a **vertically integrated** solution where one company owns the full stack
 
 **Choose Purch when:**
 - Your agent is **crypto-native** and already holds USDC on Solana
@@ -567,5 +655,11 @@ However, the comparison isn't clean because:
 - You want **pay-per-call pricing** with no monthly commitment
 - You're interested in the **Vault marketplace** (buying/selling agent skills and knowledge)
 - **On-chain settlement finality** matters (no chargebacks, instant confirmation)
-- You only need **Amazon + Shopify** merchant coverage
-- Your use case involves **micropayment-scale API calls** ($0.01 per search)
+- You want your service to be **discoverable** via x402 Bazaar (Coinbase CDP catalog)
+
+**Choose Crossmint directly when:**
+- You want **both crypto AND fiat** payment support
+- You need **50+ blockchain** options (not just Solana)
+- You want **credit card, Apple Pay, Google Pay** alongside crypto
+- You don't need Purch's AI discovery or Vault features
+- You want to build your **own x402/auth layer** on top of Crossmint's commerce engine
