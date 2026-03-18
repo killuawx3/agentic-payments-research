@@ -607,19 +607,248 @@ When a request is made without payment, the API returns:
 
 ---
 
+## Internal Architecture (From Source Code)
+
+The `x-purch` repo ([github.com/purch-xyz/x-purch](https://github.com/purch-xyz/x-purch)) reveals how Purch works under the hood. It's a surprisingly thin layer — Purch is essentially **x402 middleware + Crossmint order API + Supabase persistence**.
+
+### System Architecture
+
+```
+Client (wallet + x402 signer)
+        |
+        v
+POST /orders/solana
+        |
+        v
++-------+------------------------------------------+
+|              Hono HTTP Router                     |
+|                                                   |
+|  1. Proxy Fix Middleware                          |
+|     (HTTPS detection behind load balancer)        |
+|                                                   |
+|  2. Payer Logging Middleware                      |
+|     (logs wallet address + payment header)        |
+|                                                   |
+|  3. x402 Payment Middleware (@x402/hono)          |
+|     - Coinbase CDP facilitator verifies payment   |
+|     - ExactSvmScheme for Solana USDC              |
+|     - Price: $0.01 per order creation             |
+|     - payTo: env.X402_SOLANA_WALLET_ADDRESS       |
+|     - Returns 402 if no valid payment             |
+|                                                   |
+|  4. Zod Validation Middleware                     |
+|     (validates email, payerAddress, productUrl,   |
+|      physicalAddress)                             |
+|                                                   |
+|  5. Order Handler                                 |
+|     - Resolves product URL to locator             |
+|     - Calls Crossmint Orders API                  |
+|     - Saves order + user to Supabase/Postgres     |
+|     - Returns orderId + clientSecret +            |
+|       serializedTransaction                       |
++---------------------------------------------------+
+        |
+        v
++-------+------------------------------------------+
+|           Crossmint Orders API                    |
+|   POST /2022-06-09/orders                         |
+|                                                   |
+|   Body:                                           |
+|   { recipient: { email, physicalAddress },        |
+|     locale,                                       |
+|     payment: { method: "solana",                  |
+|       currency: "usdc", payerAddress },           |
+|     lineItems: [{ productLocator }] }             |
+|                                                   |
+|   Returns:                                        |
+|   { clientSecret, order: { orderId,               |
+|     payment: { status, preparation: {             |
+|       serializedTransaction } },                  |
+|     quote: { totalPrice }, lineItems } }          |
++---------------------------------------------------+
+        |
+        v
++-------+------------------------------------------+
+|           Supabase / PostgreSQL                   |
+|                                                   |
+|   users_x402:                                     |
+|   { id, walletAddress, network, email }           |
+|   (unique: walletAddress + network)               |
+|                                                   |
+|   orders_x402:                                    |
+|   { id, userId, network, clientSecret(bcrypt),    |
+|     createdAt, updatedAt }                        |
++---------------------------------------------------+
+```
+
+### The Key Insight: Crossmint Is the Actual Commerce Engine
+
+Purch does NOT handle product resolution, pricing, tax, shipping, or order placement itself. **Crossmint does all of that.** Purch is a thin wrapper that:
+
+1. **Accepts x402 payments** (via Coinbase CDP + `@x402/hono` middleware)
+2. **Resolves product URLs** to Crossmint-compatible locators
+3. **Forwards to Crossmint's Orders API** (`POST /2022-06-09/orders`)
+4. **Persists order metadata** in Supabase for status tracking
+5. **Returns a serialized Solana transaction** for the buyer to sign
+
+Crossmint handles the actual commerce: product lookup, pricing, tax calculation, payment processing, and order fulfillment.
+
+### Product URL Resolution
+
+The source code reveals exactly how Purch routes product URLs to different platforms:
+
+```typescript
+// From src/orders/createCrossmintOrder.ts
+
+PLATFORM_HOSTNAMES = {
+  amazon:            ["amazon."],              // → "amazon:{url}"
+  shopify:           ["myshopify.com"],         // → "shopify:{url}:{variantId}"
+  browserAutomation: [                          // → "url:{url}"
+    "nike.com", "adidas.com", "crocs.com",
+    "gymshark.com", "on.com"
+  ]
+}
+```
+
+**Locator format by platform:**
+
+| Platform | Detection | Locator Format | Notes |
+|----------|-----------|---------------|-------|
+| **Amazon** | Hostname contains `amazon.` | `amazon:{productUrl}` | Includes `a.co`, `amzn.to` short URL expansion |
+| **Shopify** | Hostname contains `myshopify.com` OR path contains `/products/` | `shopify:{baseUrl}:{variantId}` | `variantId` extracted from `?variant=` query param; **required** |
+| **Browser Automation** | Hostname matches Nike, Adidas, Crocs, Gymshark, On | `url:{productUrl}` | Crossmint uses browser automation for these merchants |
+| **Everything else** | Fallback | `url:{productUrl}` | Also uses browser automation |
+
+**Important discoveries from the code:**
+- **Short URL expansion:** `a.co`, `amzn.to`, `amzn.com`, `bit.ly`, `t.co` are automatically followed (HEAD request with 5s timeout) before locator resolution
+- **URL validation:** Must be HTTPS, no IP addresses, no localhost/local/internal domains, no auth credentials in URL
+- **Shopify variant is mandatory:** If a Shopify URL lacks `?variant=`, the API throws a 400 error
+- **Browser automation sites** (Nike, Adidas, Crocs, Gymshark, On) are hardcoded — these go through Crossmint's browser automation checkout, not a direct API integration
+
+### x402 Payment Mechanism (Source Code Detail)
+
+```typescript
+// From src/index.ts
+
+// 1. Coinbase CDP facilitator validates x402 payments
+const facilitatorConfig = createFacilitatorConfig(
+  env.X402_CDP_API_KEY_ID,
+  env.X402_CDP_API_KEY_SECRET,
+);
+
+// 2. Register Solana mainnet with ExactSvmScheme
+const facilitatorClient = new HTTPFacilitatorClient(facilitatorConfig);
+const resourceServer = new x402ResourceServer(facilitatorClient)
+  .register(SOLANA_MAINNET_CAIP2, new ExactSvmScheme());
+
+// 3. Payment middleware on /orders/solana
+paymentMiddleware({
+  "POST /orders/solana": {
+    accepts: [{
+      scheme: "exact",
+      price: "$0.01",               // Fixed price for API call
+      network: SOLANA_MAINNET_CAIP2, // solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp
+      payTo: env.X402_SOLANA_WALLET_ADDRESS,
+    }],
+    maxTimeoutSeconds: 300,
+  }
+}, resourceServer);
+```
+
+**Key technical details:**
+- Uses **Coinbase CDP** (Coinbase Developer Platform) as the x402 facilitator — not a custom implementation
+- Payment scheme is `exact` (exact amount required, not a range)
+- Network identifier follows **CAIP-2** standard: `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp` (Solana mainnet)
+- The x402 price for order creation is **$0.01** — this is just the API fee. The actual product cost is handled separately by Crossmint via a **serialized Solana transaction** returned to the buyer for signing
+- `maxTimeoutSeconds: 300` (5 minutes) for payment settlement
+
+### Two-Phase Payment Model
+
+This is crucial to understanding Purch's actual payment flow. There are **two separate payments**:
+
+```
+Phase 1: x402 API Fee ($0.01 USDC)
+    Agent pays $0.01 to Purch's wallet via x402 protocol
+    This authenticates the API call and covers Purch's service fee
+        |
+        v
+Phase 2: Product Payment (dynamic, USDC)
+    Crossmint returns a serializedTransaction
+    Agent signs and submits this Solana transaction
+    This pays the actual product cost (price + tax + shipping)
+    Payment goes through Crossmint's payment rails
+```
+
+So the agent pays **twice**: once for API access ($0.01 via x402), and once for the product (via Crossmint's serialized transaction). The product payment is NOT part of the x402 flow — it's a separate Solana transaction that Crossmint constructs.
+
+### Order Status Security
+
+Order status lookups use **bcrypt-hashed client secrets**:
+
+```
+POST /orders/solana → returns { clientSecret: "raw-secret" }
+                       (stored as: SHA-256 → bcrypt hash in Postgres)
+
+GET /orders/{id}    → requires Authorization: <raw-secret>
+                       (verified: SHA-256(secret) → bcrypt.compare(hash))
+```
+
+The client secret is returned once at order creation and cannot be recovered. Status lookups are authenticated against the bcrypt hash — no API key needed.
+
+### Bazaar Discovery (x402 Ecosystem)
+
+The source code includes **Bazaar metadata** in the x402 payment middleware:
+
+```typescript
+extensions: {
+  bazaar: {
+    discoverable: true,
+    category: "ecommerce",
+    tags: ["orders", "shopping", "amazon", "crypto"],
+    inputSchema: { ... },
+    outputSchema: { ... },
+  }
+}
+```
+
+This means Purch is **registered in the x402 Bazaar discovery layer** — Coinbase's CDP catalog where agents can browse and discover x402-enabled services. Any agent browsing the Bazaar can find Purch and call it without prior knowledge of the API.
+
+### Supported Merchants (Expanded)
+
+The source code reveals broader merchant support than the public docs suggest:
+
+| Category | Merchants | Locator Prefix |
+|----------|-----------|---------------|
+| **Amazon** | All Amazon domains + short URLs (a.co, amzn.to) | `amazon:` |
+| **Shopify** | Any .myshopify.com or store with `/products/` path | `shopify:` |
+| **Browser Automation** | Nike, Adidas, Crocs, Gymshark, On Running | `url:` |
+| **Fallback** | Any other HTTPS URL | `url:` |
+
+The `url:` prefix means Crossmint will attempt browser automation checkout — so Purch theoretically supports **any merchant** where Crossmint's browser automation works, not just Amazon and Shopify.
+
 ## Technology Stack
 
 | Component | Technology |
 |-----------|-----------|
-| **Payment protocol** | x402 (HTTP 402 negotiation) |
-| **Settlement chain** | Solana |
+| **Runtime** | Bun v1.1+ |
+| **HTTP Framework** | Hono |
+| **Payment protocol** | x402 via Coinbase CDP (`@coinbase/x402`, `@x402/hono`, `@x402/svm`) |
+| **x402 Facilitator** | Coinbase Developer Platform (CDP) |
+| **Commerce engine** | Crossmint Orders API (`/2022-06-09/orders`) |
+| **Settlement chain** | Solana mainnet (CAIP-2: `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp`) |
 | **Currency** | USDC (SPL token) |
-| **Smart wallets** | Crossmint |
+| **Database** | PostgreSQL via Supabase |
+| **ORM** | Drizzle ORM |
+| **Validation** | Zod |
+| **Env config** | @t3-oss/env-core |
+| **Client SDK** | `x402-fetch` (wraps fetch with automatic x402 payment handling) |
 | **Token** | $PURCH (utility token for premium features) |
-| **API spec** | OpenAPI 3.1.0 |
+| **API spec** | OpenAPI 3.0.0 (generated from handler definitions) |
 | **Docs** | Docusaurus |
 | **Web app** | app.purch.xyz |
 | **Vault marketplace** | vault.purch.xyz |
+| **Deployment** | Google Cloud Run (Docker) |
+| **Live API** | `https://x402.purch.xyz` |
 
 ---
 
@@ -809,4 +1038,4 @@ Purch enables agentic commerce by providing:
 6. **x402 Native** — no API keys, no subscriptions, pure pay-per-call via USDC on Solana
 7. **Crypto-Only Settlement** — all payments in USDC on Solana via Crossmint smart wallets
 
-The core innovation is combining **AI-powered product discovery** with **x402 crypto-native checkout** — agents don't need API keys, credit cards, or merchant accounts. They pay USDC per API call and the purchase cost is settled in the same transaction. The Vault marketplace adds a unique dimension where agents can buy capabilities (skills, knowledge, personas) from other agents or humans.
+The core architecture is a **thin x402 wrapper around Crossmint's commerce engine**. Purch handles payment authentication via Coinbase CDP's x402 facilitator ($0.01/call), resolves product URLs to platform-specific locators (Amazon, Shopify, browser automation for Nike/Adidas/etc.), and forwards everything to Crossmint's Orders API which handles the actual product lookup, pricing, tax, shipping, and fulfillment. Product payment is a separate Solana transaction (serialized by Crossmint, signed by the buyer). The Vault marketplace adds a unique dimension where agents can buy capabilities (skills, knowledge, personas) from other agents or humans. Purch is registered in the **x402 Bazaar discovery layer**, making it discoverable to any agent browsing Coinbase's CDP catalog.
