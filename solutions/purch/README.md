@@ -891,6 +891,128 @@ POST /api/2022-06-09/orders
 +-----------------+
 ```
 
+### Crossmint Checkout Architecture (End-to-End Sequence)
+
+This shows every HTTP call and on-chain transaction that happens when an agent buys a product through Purch:
+
+```
+Agent                    Purch API              Coinbase CDP        Crossmint API           Solana          Merchant
+  |                          |                      |                    |                     |               |
+  |  1. POST /orders/solana  |                      |                    |                     |               |
+  |  (no X-PAYMENT header)   |                      |                    |                     |               |
+  |------------------------->|                      |                    |                     |               |
+  |                          |                      |                    |                     |               |
+  |  2. 402 Payment Required |                      |                    |                     |               |
+  |  { accepts: [{           |                      |                    |                     |               |
+  |    scheme: "exact",      |                      |                    |                     |               |
+  |    price: "$0.01",       |                      |                    |                     |               |
+  |    network: "solana:5e..",|                     |                    |                     |               |
+  |    payTo: "Purch_wallet" |                      |                    |                     |               |
+  |  }] }                   |                      |                    |                     |               |
+  |<-------------------------|                      |                    |                     |               |
+  |                          |                      |                    |                     |               |
+  |  3. Transfer $0.01 USDC  |                      |                    |                     |               |
+  |  to Purch wallet --------|-------------------------------------------+-------------------->|               |
+  |                          |                      |                    |                     |               |
+  |  4. Retry POST           |                      |                    |                     |               |
+  |  /orders/solana          |                      |                    |                     |               |
+  |  + X-PAYMENT header      |                      |                    |                     |               |
+  |  (tx signature proof)    |                      |                    |                     |               |
+  |------------------------->|                      |                    |                     |               |
+  |                          |                      |                    |                     |               |
+  |                          |  5. Verify x402      |                    |                     |               |
+  |                          |  payment signature   |                    |                     |               |
+  |                          |--------------------->|                    |                     |               |
+  |                          |                      |                    |                     |               |
+  |                          |  6. Payment valid    |                    |                     |               |
+  |                          |<---------------------|                    |                     |               |
+  |                          |                      |                    |                     |               |
+  |                          |  7. Resolve URL to productLocator         |                     |               |
+  |                          |  (amazon: / shopify: / url:)              |                     |               |
+  |                          |                      |                    |                     |               |
+  |                          |  8. POST /api/2022-06-09/orders           |                     |               |
+  |                          |  { recipient, payment: { method: "solana",|                     |               |
+  |                          |    currency: "usdc", payerAddress },      |                     |               |
+  |                          |    lineItems: [{ productLocator }] }      |                     |               |
+  |                          |-------------------------------------->    |                     |               |
+  |                          |                      |                    |                     |               |
+  |                          |                      |                    |  9. Resolve product  |               |
+  |                          |                      |                    |  (fetch price, tax,  |               |
+  |                          |                      |                    |   shipping from      |               |
+  |                          |                      |                    |   merchant)          |               |
+  |                          |                      |                    |---------------------|-------------->|
+  |                          |                      |                    |                     |               |
+  |                          |                      |                    |<--------------------|------ Quote --|
+  |                          |                      |                    |                     |               |
+  |                          |                      |                    |  10. Build serialized|               |
+  |                          |                      |                    |  Solana transaction  |               |
+  |                          |                      |                    |  for product payment |               |
+  |                          |                      |                    |                     |               |
+  |                          |  11. { clientSecret, orderId,             |                     |               |
+  |                          |    serializedTransaction,                 |                     |               |
+  |                          |    quote: { totalPrice },                 |                     |               |
+  |                          |    payment: { status: "awaiting-payment" }|                     |               |
+  |                          |<--------------------------------------    |                     |               |
+  |                          |                      |                    |                     |               |
+  |                          |  12. Save order +    |                    |                     |               |
+  |                          |  user to Supabase    |                    |                     |               |
+  |                          |  (bcrypt client      |                    |                     |               |
+  |                          |   secret)            |                    |                     |               |
+  |                          |                      |                    |                     |               |
+  |  13. 201 Created         |                      |                    |                     |               |
+  |  { orderId,              |                      |                    |                     |               |
+  |    clientSecret,         |                      |                    |                     |               |
+  |    serializedTransaction,|                      |                    |                     |               |
+  |    quote, lineItems }    |                      |                    |                     |               |
+  |<-------------------------|                      |                    |                     |               |
+  |                          |                      |                    |                     |               |
+  |  14. Sign serialized     |                      |                    |                     |               |
+  |  transaction with        |                      |                    |                     |               |
+  |  agent's Solana key      |                      |                    |                     |               |
+  |                          |                      |                    |                     |               |
+  |  15. Submit signed tx    |                      |                    |                     |               |
+  |  to Solana network ------|-------------------------------------------+-------------------->|               |
+  |                          |                      |                    |                     |               |
+  |                          |                      |                    |  16. Crossmint       |               |
+  |                          |                      |                    |  detects payment     |               |
+  |                          |                      |                    |  on-chain            |               |
+  |                          |                      |                    |<--------------------|               |
+  |                          |                      |                    |                     |               |
+  |                          |                      |                    |  17. Place order on  |               |
+  |                          |                      |                    |  merchant (API or    |               |
+  |                          |                      |                    |  browser automation) |               |
+  |                          |                      |                    |---------------------|-------------->|
+  |                          |                      |                    |                     |               |
+  |                          |                      |                    |<--------------------|-- Confirmed --|
+  |                          |                      |                    |                     |               |
+  |  18. GET /orders/{id}    |                      |                    |                     |               |
+  |  + Authorization:        |                      |                    |                     |               |
+  |    clientSecret          |                      |                    |                     |               |
+  |------------------------->|                      |                    |                     |               |
+  |                          |  19. GET /api/2022-06-09/orders/{id}      |                     |               |
+  |                          |-------------------------------------->    |                     |               |
+  |                          |                      |                    |                     |               |
+  |                          |  20. { phase: "completed",                |                     |               |
+  |                          |    delivery: { status: "in-progress" } }  |                     |               |
+  |                          |<--------------------------------------    |                     |               |
+  |                          |                      |                    |                     |               |
+  |  21. { phase, delivery,  |                      |                    |                     |               |
+  |    payment, quote }      |                      |                    |                     |               |
+  |<-------------------------|                      |                    |                     |               |
+  |                          |                      |                    |                     |    Merchant   |
+  |                          |                      |                    |                     |    ships to   |
+  |                          |                      |                    |                     |    buyer addr |
+```
+
+**Key observations from this flow:**
+- Steps 1-6: **x402 negotiation** — agent pays $0.01 to Purch, Coinbase CDP verifies
+- Steps 7-12: **Purch's actual work** — URL resolution + Crossmint API call + Supabase persistence
+- Steps 13-15: **Agent signs product payment** — a SEPARATE Solana tx built by Crossmint
+- Steps 16-17: **Crossmint handles fulfillment** — detects on-chain payment, places order on merchant
+- Steps 18-21: **Status polling** — Purch proxies Crossmint's order status, authenticated by bcrypt client secret
+
+The agent makes **two on-chain payments** (step 3: $0.01 to Purch, step 15: product cost to Crossmint) and **zero API keys** are needed.
+
 ### Crossmint Product Locator Format
 
 The `productLocator` string in `lineItems` tells Crossmint which platform and product to purchase:
